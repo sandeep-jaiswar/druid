@@ -1,3 +1,9 @@
+version: '3.8'
+
+networks:
+  druid-network:
+    driver: bridge
+
 services:
   kafka:
     image: apache/kafka:latest
@@ -22,6 +28,8 @@ services:
     volumes:
       - kafka_data:/var/lib/kafka/data
     restart: unless-stopped
+    networks:
+      - druid-network
 
   postgres:
     image: postgres:15.3
@@ -35,23 +43,27 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     restart: unless-stopped
+    networks:
+      - druid-network
 
-  druid:
+  # Druid Coordinator - manages segments and data availability
+  coordinator:
     image: apache/druid:28.0.0
-    container_name: druid
+    container_name: coordinator
     environment:
       - JAVA_OPTS=-Xms512m -Xmx512m
       - druid_metadata_storage_type=postgresql
       - druid_metadata_storage_connector_connectURI=jdbc:postgresql://postgres:5432/druid
       - druid_metadata_storage_connector_user=druid
       - druid_metadata_storage_connector_password=druid
-      - druid_extensions_loadList=["postgresql-metadata-storage"]
+      - druid_extensions_loadList=["postgresql-metadata-storage","druid-kafka-indexing-service"]
       - druid_coordinator_startDelay=PT30S
-      - druid_host=druid
+      - druid_host=coordinator
+      # ZooKeeper (using embedded for simplicity)
+      - druid_zk_service_host=coordinator
+      - druid_zk_paths_base=/druid
     ports:
-      - "8888:8888"
-      - "8082:8082"
-      - "8083:8083"
+      - "8081:8081"
     volumes:
       - druid_data:/opt/data
     depends_on:
@@ -62,17 +74,234 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 60s
     restart: unless-stopped
+    networks:
+      - druid-network
 
-  flask:
-    build: ./flask_app
-    container_name: flask
+  # Druid Overlord - manages indexing tasks
+  overlord:
+    image: apache/druid:28.0.0
+    container_name: overlord
     environment:
-      - KAFKA_BROKER=kafka:9092
+      - JAVA_OPTS=-Xms512m -Xmx512m
+      - druid_metadata_storage_type=postgresql
+      - druid_metadata_storage_connector_connectURI=jdbc:postgresql://postgres:5432/druid
+      - druid_metadata_storage_connector_user=druid
+      - druid_metadata_storage_connector_password=druid
+      - druid_extensions_loadList=["postgresql-metadata-storage","druid-kafka-indexing-service"]
+      - druid_host=overlord
+      # ZooKeeper
+      - druid_zk_service_host=coordinator
+      - druid_zk_paths_base=/druid
+      # Indexing service config
+      - druid_indexer_runner_type=local
+      - druid_indexer_task_baseTaskDir=/opt/data/task
+    ports:
+      - "8090:8090"
+    volumes:
+      - druid_data:/opt/data
+    depends_on:
+      - postgres
+      - coordinator
+    command: [ "overlord" ]
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8090/status/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - druid-network
+
+  # Druid Router - query routing and web UI
+  router:
+    image: apache/druid:28.0.0
+    container_name: router
+    environment:
+      - JAVA_OPTS=-Xms256m -Xmx256m
+      - druid_metadata_storage_type=postgresql
+      - druid_metadata_storage_connector_connectURI=jdbc:postgresql://postgres:5432/druid
+      - druid_metadata_storage_connector_user=druid
+      - druid_metadata_storage_connector_password=druid
+      - druid_extensions_loadList=["postgresql-metadata-storage","druid-kafka-indexing-service"]
+      - druid_host=router
+      # ZooKeeper
+      - druid_zk_service_host=coordinator
+      - druid_zk_paths_base=/druid
+      # Router config
+      - druid_router_http_numConnections=50
+      - druid_router_http_readTimeout=PT5M
+      - druid_router_http_numMaxThreads=100
+      - druid_server_http_numThreads=100
+    ports:
+      - "8888:8888"
+    volumes:
+      - druid_data:/opt/data
+    depends_on:
+      - postgres
+      - coordinator
+      - overlord
+    command: [ "router" ]
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8888/status/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - druid-network
+
+  # Druid Broker - handles queries
+  broker:
+    image: apache/druid:28.0.0
+    container_name: broker
+    environment:
+      - JAVA_OPTS=-Xms512m -Xmx512m
+      - druid_metadata_storage_type=postgresql
+      - druid_metadata_storage_connector_connectURI=jdbc:postgresql://postgres:5432/druid
+      - druid_metadata_storage_connector_user=druid
+      - druid_metadata_storage_connector_password=druid
+      - druid_extensions_loadList=["postgresql-metadata-storage","druid-kafka-indexing-service"]
+      - druid_host=broker
+      # ZooKeeper
+      - druid_zk_service_host=coordinator
+      - druid_zk_paths_base=/druid
+      # Broker config
+      - druid_processing_buffer_sizeBytes=134217728
+      - druid_processing_numMergeBuffers=6
+      - druid_processing_numThreads=2
+    ports:
+      - "8082:8082"
+    volumes:
+      - druid_data:/opt/data
+    depends_on:
+      - postgres
+      - coordinator
+    command: [ "broker" ]
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8082/status/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - druid-network
+
+  # Druid Historical - stores and serves historical data
+  historical:
+    image: apache/druid:28.0.0
+    container_name: historical
+    environment:
+      - JAVA_OPTS=-Xms512m -Xmx512m
+      - druid_metadata_storage_type=postgresql
+      - druid_metadata_storage_connector_connectURI=jdbc:postgresql://postgres:5432/druid
+      - druid_metadata_storage_connector_user=druid
+      - druid_metadata_storage_connector_password=druid
+      - druid_extensions_loadList=["postgresql-metadata-storage","druid-kafka-indexing-service"]
+      - druid_host=historical
+      # ZooKeeper
+      - druid_zk_service_host=coordinator
+      - druid_zk_paths_base=/druid
+      # Historical config
+      - druid_server_maxSize=1073741824
+      - druid_processing_buffer_sizeBytes=134217728
+      - druid_processing_numMergeBuffers=6
+      - druid_processing_numThreads=2
+      # Segment cache
+      - druid_segmentCache_locations=[{"path":"/opt/data/segment-cache","maxSize":1073741824}]
+    ports:
+      - "8083:8083"
+    volumes:
+      - druid_data:/opt/data
+    depends_on:
+      - postgres
+      - coordinator
+    command: [ "historical" ]
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8083/status/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - druid-network
+
+  # Druid MiddleManager - executes indexing tasks
+  middlemanager:
+    image: apache/druid:28.0.0
+    container_name: middlemanager
+    environment:
+      - JAVA_OPTS=-Xms256m -Xmx256m
+      - druid_metadata_storage_type=postgresql
+      - druid_metadata_storage_connector_connectURI=jdbc:postgresql://postgres:5432/druid
+      - druid_metadata_storage_connector_user=druid
+      - druid_metadata_storage_connector_password=druid
+      - druid_extensions_loadList=["postgresql-metadata-storage","druid-kafka-indexing-service"]
+      - druid_host=middlemanager
+      # ZooKeeper
+      - druid_zk_service_host=coordinator
+      - druid_zk_paths_base=/druid
+      # MiddleManager config
+      - druid_worker_capacity=4
+      - druid_indexer_runner_javaOpts=-server -Xmx1g -XX:MaxDirectMemorySize=1g -Duser.timezone=UTC -Dfile.encoding=UTF-8 -XX:+ExitOnOutOfMemoryError -Djava.util.logging.manager=org.apache.logging.log4j.jul.LogManager
+      - druid_indexer_task_baseTaskDir=/opt/data/task
+      - druid_indexer_task_defaultHadoopCoordinates=["org.apache.hadoop:hadoop-client:3.3.4"]
+    ports:
+      - "8091:8091"
+    volumes:
+      - druid_data:/opt/data
+    depends_on:
+      - postgres
+      - coordinator
+      - overlord
+    command: [ "middleManager" ]
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8091/status/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - druid-network
+
+  stock-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: stock-api
+    networks:
+      - druid-network
+    environment:
+      # Kafka Configuration
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - KAFKA_TOPIC=stock-data
+      - KAFKA_GROUP_ID=stock-api-producer
+      - KAFKA_AUTO_OFFSET_RESET=latest
+
+      # API Configuration
+      - FLASK_HOST=0.0.0.0
+      - FLASK_PORT=5000
+      - FLASK_DEBUG=false
+
+      # Logging
+      - LOG_LEVEL=INFO
     ports:
       - "5000:5000"
     depends_on:
-      - kafka
+      kafka:
+        condition: service_started
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:5000/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped
 
 volumes:

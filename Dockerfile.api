@@ -1,0 +1,53 @@
+# Stock Data API Dockerfile
+# Follows containerization best practices with multi-stage build
+
+FROM python:3.11-slim as base
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    gcc \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements first for better caching
+COPY requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application source code
+COPY stock_api.py .
+
+# Create non-root user
+RUN useradd -m -u 1000 apiuser && chown -R apiuser:apiuser /app
+USER apiuser
+
+# Set environment variables
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+
+# API Configuration defaults
+ENV FLASK_HOST=0.0.0.0
+ENV FLASK_PORT=5000
+ENV FLASK_DEBUG=false
+ENV LOG_LEVEL=INFO
+
+# Kafka Configuration defaults
+ENV KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+ENV KAFKA_TOPIC=stock-data
+ENV KAFKA_GROUP_ID=stock-api-producer
+ENV KAFKA_AUTO_OFFSET_RESET=latest
+
+# Expose port
+EXPOSE 5000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:5000/health || exit 1
+
+# Default command
+CMD ["python", "stock_api.py"]

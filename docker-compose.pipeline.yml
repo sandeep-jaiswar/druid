@@ -1,0 +1,60 @@
+# Docker Compose for Druid Pipeline Application
+# Extends the existing docker-compose.yml with the pipeline service
+
+version: '3.8'
+
+services:
+  druid-pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile.pipeline
+    container_name: druid-pipeline
+    depends_on:
+      - kafka
+      - stock-api
+      - coordinator
+      - overlord
+    environment:
+      # Kafka Configuration
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - KAFKA_TOPIC=stock-data
+      - KAFKA_GROUP_ID=druid-kafka-indexing-service
+      - KAFKA_AUTO_OFFSET_RESET=latest
+
+      # Druid Configuration
+      - DRUID_COORDINATOR_URL=http://coordinator:8081
+      - DRUID_OVERLORD_URL=http://overlord:8090
+      - DRUID_ROUTER_URL=http://router:8888
+      - DRUID_DATASOURCE=stock_data
+
+      # Ingestion Configuration
+      - INGESTION_TASK_COUNT=1
+      - INGESTION_REPLICAS=1
+      - INGESTION_TASK_DURATION=PT3600S
+      - INGESTION_MAX_ROWS_MEMORY=100000
+      - INGESTION_SEGMENT_GRANULARITY=DAY
+      - INGESTION_QUERY_GRANULARITY=MINUTE
+
+      # Logging
+      - LOG_LEVEL=INFO
+
+    networks:
+      - druid_default
+
+    # Override command for different use cases
+    # command: ["python", "main.py", "submit"]      # Just submit task
+    # command: ["python", "main.py", "run", "--monitor-only"]  # Monitor only
+
+    restart: unless-stopped
+
+    # Volume for logs (optional)
+    volumes:
+      - pipeline_logs:/app/logs
+
+volumes:
+  pipeline_logs:
+
+
+networks:
+  druid_default:
+    external: true
