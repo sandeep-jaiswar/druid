@@ -26,7 +26,8 @@ Flask App → Kafka (KRaft) → Apache Druid
 ## Prerequisites
 
 - Docker and Docker Compose
-- At least 4GB RAM available for Docker
+- At least 6GB RAM available for Docker (Druid services require adequate memory)
+- 4GB free disk space
 
 ## Quick Start
 

@@ -137,12 +137,23 @@ def fetch_stock():
 
         # Send to Kafka
         for i, record in enumerate(records):
-            # Ensure all keys are strings
-            record = {str(k): v for k, v in record.items()}
-            record['ticker'] = ticker
-            record['fetch_timestamp'] = pd.Timestamp.now().isoformat()
+            # Ensure all keys are strings and convert timestamp values to ISO format
+            converted_record = {}
+            for k, v in record.items():
+                key = str(k)
+                # Convert pandas Timestamp to string
+                if isinstance(v, pd.Timestamp):
+                    converted_record[key] = v.isoformat()
+                # Convert numpy types to native Python types
+                elif hasattr(v, 'item'):
+                    converted_record[key] = v.item()
+                else:
+                    converted_record[key] = v
+            
+            converted_record['ticker'] = ticker
+            converted_record['fetch_timestamp'] = pd.Timestamp.now().isoformat()
 
-            producer.send(TOPIC_NAME, value=json.dumps(record).encode('utf-8'))
+            producer.send(TOPIC_NAME, value=json.dumps(converted_record).encode('utf-8'))
 
         producer.flush()
         logger.info(f"Successfully sent {len(records)} records to Kafka topic {TOPIC_NAME}")
