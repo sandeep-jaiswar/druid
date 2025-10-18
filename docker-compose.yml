@@ -1,0 +1,61 @@
+services:
+  kafka:
+    image: apache/kafka:latest
+    container_name: kafka
+    environment:
+      - CLUSTER_ID=cluster-1
+      - KAFKA_PROCESS_ROLES=controller,broker
+      - KAFKA_NODE_ID=1
+      - KAFKA_CONTROLLER_QUORUM_VOTERS=1@kafka:9093
+      - KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092
+      - KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_LOG_DIRS=/var/lib/kafka/data
+      - KAFKA_AUTO_CREATE_TOPICS_ENABLE=true
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:15.3
+    container_name: postgres
+    environment:
+      POSTGRES_USER: druid
+      POSTGRES_PASSWORD: druid
+      POSTGRES_DB: druid
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  druid:
+    image: apache/druid:28.0.0
+    container_name: druid
+    environment:
+      - DRUID_METADATA_STORAGE_TYPE=postgresql
+      - DRUID_METADATA_STORAGE_CONNECTURI=jdbc:postgresql://postgres:5432/druid
+      - DRUID_METADATA_STORAGE_USER=druid
+      - DRUID_METADATA_STORAGE_PASSWORD=druid
+    ports:
+      - "8888:8888"
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
+  flask:
+    build: ./flask_app
+    container_name: flask
+    environment:
+      - KAFKA_BROKER=kafka:9092
+    ports:
+      - "5000:5000"
+    depends_on:
+      - kafka
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  kafka_data:
