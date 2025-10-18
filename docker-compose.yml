@@ -35,14 +35,28 @@ services:
     image: apache/druid:28.0.0
     container_name: druid
     environment:
-      - DRUID_METADATA_STORAGE_TYPE=postgresql
-      - DRUID_METADATA_STORAGE_CONNECTURI=jdbc:postgresql://postgres:5432/druid
-      - DRUID_METADATA_STORAGE_USER=druid
-      - DRUID_METADATA_STORAGE_PASSWORD=druid
+      - JAVA_OPTS=-Xms512m -Xmx512m
+      - druid_metadata_storage_type=postgresql
+      - druid_metadata_storage_connector_connectURI=jdbc:postgresql://postgres:5432/druid
+      - druid_metadata_storage_connector_user=druid
+      - druid_metadata_storage_connector_password=druid
+      - druid_extensions_loadList=["postgresql-metadata-storage"]
+      - druid_coordinator_startDelay=PT30S
+      - druid_host=druid
     ports:
       - "8888:8888"
+      - "8082:8082"
+      - "8083:8083"
+    volumes:
+      - druid_data:/opt/data
     depends_on:
       - postgres
+    command: [ "coordinator" ]
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8081/status/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     restart: unless-stopped
 
   flask:
@@ -59,3 +73,4 @@ services:
 volumes:
   pgdata:
   kafka_data:
+  druid_data:
