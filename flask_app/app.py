@@ -96,7 +96,8 @@ except Exception as e:
 @app.route("/fetch", methods=["POST"])
 def fetch_stock():
     """
-    Example request: POST /fetch?ticker=AAPL&period=1d&interval=1m
+    Fetch stock data from yfinance and push to Kafka.
+    Example request: POST /fetch?ticker=AAPL&period=1d&interval=15m
     """
     global producer
     ticker = request.args.get("ticker")
@@ -113,61 +114,39 @@ def fetch_stock():
             return jsonify({"error": "Kafka producer not available"}), 500
 
     try:
-            
         logger.info(f"Fetching data for {ticker}")
         data = yf.download(tickers=ticker, period=period, interval=interval)
+
         if data.empty:
             return jsonify({"error": "no data returned"}), 404
 
-        # Debug: print the column structure
-        logger.info(f"Data columns: {data.columns}")
-        logger.info(f"Data columns type: {type(data.columns)}")
-        logger.info(f"Data shape: {data.shape}")
-
-        # Flatten multi-level column names if they exist
+        # Flatten MultiIndex columns safely
         if isinstance(data.columns, pd.MultiIndex):
-            data.columns = ['_'.join(col).strip() for col in data.columns]
-            logger.info(f"Flattened columns: {data.columns}")
+            new_columns = [
+                "_".join([str(c) for c in col if c is not None]).strip()
+                for col in data.columns
+            ]
+            logger.info(f"Flattening MultiIndex columns: {list(zip(data.columns, new_columns))}")
+            data.columns = new_columns
         else:
-            # Ensure all column names are strings
             data.columns = [str(col) for col in data.columns]
-            
-        # Convert to JSON string directly - this handles MultiIndex columns properly
-        try:
-            logger.info("About to reset index and convert to JSON...")
-            json_str = data.reset_index().to_json(orient="records", date_format="iso")
-            logger.info("JSON conversion successful")
-        except Exception as e:
-            logger.error(f"Error in to_json conversion: {e}")
-            raise
-            
-        try:
-            records = json.loads(json_str)
-            logger.info(f"Retrieved {len(records)} records for {ticker}")
-        except Exception as e:
-            logger.error(f"Error parsing JSON: {e}")
-            raise
 
-        # Produce each record to Kafka using string serialization to avoid object issues
+        # Reset index and convert to dict
+        records = data.reset_index().to_dict(orient="records")
+        logger.info(f"Prepared {len(records)} records for Kafka")
+
+        # Send to Kafka
         for i, record in enumerate(records):
-            try:
-                # Add metadata
-                record['ticker'] = ticker
-                record['fetch_timestamp'] = pd.Timestamp.now().isoformat()
-                
-                # Convert the record to JSON string manually to avoid serializer issues
-                logger.info(f"About to serialize record {i}...")
-                record_json = json.dumps(record, default=str)
-                logger.info(f"Record {i} serialized successfully")
-                producer.send(TOPIC_NAME, value=record_json.encode('utf-8'))
-            except Exception as e:
-                logger.error(f"Error processing record {i}: {e}")
-                logger.error(f"Problematic record keys: {list(record.keys())}")
-                logger.error(f"Problematic record key types: {[type(k) for k in record.keys()]}")
-                raise
+            # Ensure all keys are strings
+            record = {str(k): v for k, v in record.items()}
+            record['ticker'] = ticker
+            record['fetch_timestamp'] = pd.Timestamp.now().isoformat()
+
+            producer.send(TOPIC_NAME, value=json.dumps(record).encode('utf-8'))
 
         producer.flush()
         logger.info(f"Successfully sent {len(records)} records to Kafka topic {TOPIC_NAME}")
+
         return jsonify({
             "ticker": ticker,
             "rows_sent": len(records),
@@ -175,6 +154,7 @@ def fetch_stock():
         })
 
     except Exception as e:
+        logger.error(f"Error in /fetch: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
